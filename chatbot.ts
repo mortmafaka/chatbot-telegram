@@ -383,11 +383,36 @@ async function handleMessage(msg: TelegramBot.Message) {
   let shouldRespond = false;
 
   if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
-    if (msg.text.startsWith(`@${botName}`)) {
-      // Если упоминают бота - ВСЕГДА отвечаем
-      trimmedText = msg.text.replace(`@${botName}`, "").trim();
+    const entities = msg.entities || [];
+    const isMentioned = entities.some((entity) => {
+      if (entity.type === "mention") {
+        const mentionText = msg.text?.slice(
+          entity.offset,
+          entity.offset + entity.length,
+        );
+        return mentionText?.toLowerCase() === `@${botName.toLowerCase()}`;
+      }
+      if (entity.type === "text_mention") {
+        return entity.user?.username?.toLowerCase() === botName.toLowerCase();
+      }
+      return false;
+    });
+    const isReplyToBot = msg.reply_to_message?.from?.username?.toLowerCase() ===
+      botName.toLowerCase();
+
+    if (isMentioned || isReplyToBot) {
+      // Если упоминают бота или отвечают ему - ВСЕГДА отвечаем
+      const mentionRegex = new RegExp(`@${botName}`, "gi");
+      const baseText = msg.text.replace(mentionRegex, "").trim();
+      const activity = chatActivity.get(chatId);
+      const topicInfo = activity?.currentTopic
+        ? `Тема: ${activity.currentTopic}. `
+        : "";
+      trimmedText = `${topicInfo}${baseText}`;
       shouldRespond = true;
-      logWithTime(`📢 Прямое упоминание в чате ${chatId}: ${trimmedText}`);
+      logWithTime(
+        `📢 Прямое упоминание или ответ в чате ${chatId}: ${trimmedText}`,
+      );
     } else if (COMMENT_ALL_MESSAGES) {
       // Старый режим: комментируем все сообщения
       trimmedText = msg.text.trim();
