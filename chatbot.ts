@@ -36,10 +36,10 @@ try {
 }
 logWithTime("🔮 ChatGPT API has started...");
 
-// Track conversation and parent message IDs for each chat
+// Track conversation, parent message IDs and style for each chat
 const chatContext = new Map<
   number,
-  { conversationID?: string; parentMessageID?: string }
+  { conversationID?: string; parentMessageID?: string; style?: string }
 >();
 
 // Handle messages
@@ -58,11 +58,26 @@ function handleCommand(msg: TelegramBot.Message): boolean {
     return true;
   }
 
+  // style command
+  if (trimedText?.startsWith("/style")) {
+    const styleText = trimedText.replace("/style", "").trim();
+    if (styleText) {
+      const state = chatContext.get(msg.chat.id) ?? {};
+      state.style = styleText;
+      chatContext.set(msg.chat.id, state);
+      bot.sendMessage(msg.chat.id, "✅ Style updated");
+      logWithTime("🎨 Style updated for", msg.chat.id, styleText);
+    } else {
+      bot.sendMessage(msg.chat.id, "⚠️ Please provide a style");
+    }
+    return true;
+  }
+
   // help command
   if (trimedText === "/help") {
     bot.sendMessage(
       msg.chat.id,
-      "🤖 This is a chatbot powered by ChatGPT. You can use the following commands:\n\n/reload - Reset the conversation\n/help - Show this message",
+      "🤖 This is a chatbot powered by ChatGPT. You can use the following commands:\n\n/reload - Reset the conversation\n/style <text> - Set ChatGPT response style\n/help - Show this message",
     );
     return true;
   }
@@ -115,6 +130,7 @@ async function handleMessage(msg: TelegramBot.Message) {
     const response: ChatMessage = await chatGPTAPI.sendMessage(message, {
       conversationId: state.conversationID,
       parentMessageId: state.parentMessageID,
+      systemMessage: state.style,
       onProgress: _.throttle(
         async (partialResponse: ChatMessage) => {
           respMsg = await editMessage(respMsg, partialResponse.text, false);
