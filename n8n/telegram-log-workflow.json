@@ -1,0 +1,51 @@
+{
+  "name": "Telegram Message Logger",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {
+          "useWebhook": true
+        }
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        280,
+        300
+      ],
+      "credentials": {
+        "telegramApi": "Telegram API"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "data": "={\"chatId\": $json[\"message\"][\"chat\"][\"id\"], \"user\": $json[\"message\"][\"from\"][\"username\"] || $json[\"message\"][\"from\"][\"first_name\"], \"text\": $json[\"message\"][\"text\"], \"timestamp\": new Date($json[\"message\"][\"date\"] * 1000).toISOString()}"
+      },
+      "name": "Data Store",
+      "type": "n8n-nodes-base.dataStore",
+      "typeVersion": 1,
+      "position": [
+        560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Data Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
