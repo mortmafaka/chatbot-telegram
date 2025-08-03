@@ -1,0 +1,103 @@
+{
+  "name": "Telegram Message Logger",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {
+          "useWebhook": true
+        }
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        280,
+        300
+      ],
+      "credentials": {
+        "telegramApi": "Telegram API"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "data": "={\"chatId\": $json[\"message\"][\"chat\"][\"id\"], \"userName\": $json[\"message\"][\"from\"][\"username\"] || $json[\"message\"][\"from\"][\"first_name\"], \"text\": $json[\"message\"][\"text\"], \"timestamp\": new Date($json[\"message\"][\"date\"] * 1000).toISOString(), \"chatType\": $json[\"message\"][\"chat\"][\"type\"]}"
+      },
+      "name": "Data Store",
+      "type": "n8n-nodes-base.dataStore",
+      "typeVersion": 1,
+      "position": [
+        560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.N8N_TOPIC_URL || 'http://localhost:5678/webhook/topic'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "userName",
+              "value": "={{$json.userName}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json.text}}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{$json.chatId}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": "={{$env.N8N_TIMEOUT_MS || 5000}}"
+        }
+      },
+      "name": "Send to Topic Detection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        840,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Data Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Store": {
+      "main": [
+        [
+          {
+            "node": "Send to Topic Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+} 

@@ -1,0 +1,126 @@
+{
+  "name": "Topic Detection with OpenRouter",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "topic",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "append",
+        "data": "={{$json}}"
+      },
+      "id": "Save Messages",
+      "name": "Save Messages",
+      "type": "n8n-nodes-base.datastore",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const N = 5;\nconst store = $items(0,0).map(item => item.json);\nreturn [{ json: { messages: store.slice(-N) } }];"
+      },
+      "id": "Last N Messages",
+      "name": "Last N Messages",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.OPENROUTER_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "{{$env.OPENROUTER_MODEL}}"
+            },
+            {
+              "name": "messages",
+              "value": "=[{\"role\": \"system\", \"content\": \"Определи тему разговора из следующих сообщений. Выбери одну из тем: технологии, работа, развлечения, спорт, политика, семья, общий. Отвечай только названием темы.\"}, {\"role\": \"user\", \"content\": \"={{$json.messages.map(m => `${m.userName}: ${m.text}`).join('\\n')}}\"}]"
+            },
+            {
+              "name": "max_tokens",
+              "value": "50"
+            },
+            {
+              "name": "temperature",
+              "value": "0.1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "OpenRouter API",
+      "name": "OpenRouter API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $json.choices[0].message.content.trim().toLowerCase();\nconst topics = ['технологии', 'работа', 'развлечения', 'спорт', 'политика', 'семья', 'общий'];\nconst detectedTopic = topics.find(topic => response.includes(topic)) || 'общий';\nreturn [{ json: { topic: detectedTopic, confidence: response } }];"
+      },
+      "id": "Parse Topic",
+      "name": "Parse Topic",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "data": "={{[{topic: $json.topic, confidence: $json.confidence, startTime: Date.now()}]}}",
+        "options": { "updateKey": "topic" }
+      },
+      "id": "Store Topic",
+      "name": "Store Topic",
+      "type": "n8n-nodes-base.datastore",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Save Messages", "type": "main", "index": 0 }]]
+    },
+    "Save Messages": {
+      "main": [[{ "node": "Last N Messages", "type": "main", "index": 0 }]]
+    },
+    "Last N Messages": {
+      "main": [[{ "node": "OpenRouter API", "type": "main", "index": 0 }]]
+    },
+    "OpenRouter API": {
+      "main": [[{ "node": "Parse Topic", "type": "main", "index": 0 }]]
+    },
+    "Parse Topic": {
+      "main": [[{ "node": "Store Topic", "type": "main", "index": 0 }]]
+    }
+  }
+} 
