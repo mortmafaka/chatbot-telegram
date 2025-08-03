@@ -133,7 +133,11 @@ async function handleMessage(msg: TelegramBot.Message) {
       systemMessage: state.style,
       onProgress: _.throttle(
         async (partialResponse: ChatMessage) => {
-          respMsg = await editMessage(respMsg, partialResponse.text, false);
+          respMsg = await editMessage(
+            respMsg,
+            escapeMarkdown(partialResponse.text),
+            false,
+          );
           bot.sendChatAction(chatId, "typing");
         },
         4000,
@@ -145,7 +149,7 @@ async function handleMessage(msg: TelegramBot.Message) {
       conversationID: response.conversationId,
       parentMessageID: response.id,
     });
-    editMessage(respMsg, response.text);
+    editMessage(respMsg, escapeMarkdown(response.text));
     logWithTime("📨 Response:", response);
   } catch (err) {
     logWithTime("⛔️ ChatGPT API error:", err.message);
@@ -161,6 +165,11 @@ async function handleMessage(msg: TelegramBot.Message) {
   }
 }
 
+// Escape Telegram MarkdownV2 special characters
+function escapeMarkdown(text: string): string {
+  return text.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, "\\$&");
+}
+
 // Edit telegram message
 async function editMessage(
   msg: TelegramBot.Message,
@@ -174,7 +183,7 @@ async function editMessage(
     const resp = await bot.editMessageText(text, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
-      parse_mode: needParse ? "Markdown" : undefined,
+      parse_mode: needParse ? "MarkdownV2" : undefined,
     });
     // type of resp is boolean | Message
     if (typeof resp === "object") {
