@@ -6,10 +6,14 @@ import TelegramBot from "npm:node-telegram-bot-api@^0.60.0";
 import "https://deno.land/x/dotenv@v3.2.0/load.ts";
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN");
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ??
+  "cognitivecomputations/dolphin-mistral-24b-venice-edition:free";
+const OPENROUTER_API_BASE = Deno.env.get("OPENROUTER_API_BASE") ??
+  "https://openrouter.ai/api";
 
-if (!BOT_TOKEN || !OPENAI_API_KEY) {
-  logWithTime("⛔️ BOT_TOKEN and OPENAI_API_KEY must be set");
+if (!BOT_TOKEN || !OPENROUTER_API_KEY) {
+  logWithTime("⛔️ BOT_TOKEN and OPENROUTER_API_KEY must be set");
   Deno.exit(1);
 }
 
@@ -26,15 +30,22 @@ if (!botName) {
   logWithTime("🤖 Bot", `@${botName}`, "has started...");
 }
 
-// Start ChatGPT API
-let chatGPTAPI: ChatGPTAPI;
+// Start OpenRouter API
+let openRouterAPI: ChatGPTAPI;
 try {
-  chatGPTAPI = new ChatGPTAPI({ apiKey: OPENAI_API_KEY });
+  openRouterAPI = new ChatGPTAPI({
+    apiKey: OPENROUTER_API_KEY,
+    apiBaseUrl: OPENROUTER_API_BASE,
+    completionParams: { model: OPENROUTER_MODEL },
+  });
 } catch (err) {
-  logWithTime("⛔️ ChatGPT API error:", err.message);
+  logWithTime("⛔️ OpenRouter API error:", err.message);
   Deno.exit(1);
 }
-logWithTime("🔮 ChatGPT API has started...");
+logWithTime(
+  "🔮 OpenRouter API has started with model",
+  OPENROUTER_MODEL,
+);
 
 // Track conversation, parent message IDs and style for each chat
 const chatContext = new Map<
@@ -78,14 +89,14 @@ function handleCommand(
   if (trimmedText === "/help") {
     bot.sendMessage(
       msg.chat.id,
-      "🤖 This is a chatbot powered by ChatGPT. You can use the following commands:\n\n/reload - Reset the conversation\n/style <text> - Set ChatGPT response style\n/help - Show this message",
+      "🤖 This is a chatbot powered by OpenRouter models. You can use the following commands:\n\n/reload - Reset the conversation\n/style <text> - Set response style\n/help - Show this message",
     );
     return true;
   }
   return false;
 }
 
-// Parse message and send to ChatGPT if needed
+// Parse message and send to OpenRouter if needed
 async function handleMessage(msg: TelegramBot.Message) {
   const chatId = msg.chat.id;
   if (!msg.text) {
@@ -124,10 +135,10 @@ async function handleMessage(msg: TelegramBot.Message) {
     return;
   }
 
-  // Send message to ChatGPT
+  // Send message to OpenRouter
   try {
     const state = chatContext.get(chatId) ?? {};
-    const response: ChatMessage = await chatGPTAPI.sendMessage(trimmedText, {
+    const response: ChatMessage = await openRouterAPI.sendMessage(trimmedText, {
       conversationId: state.conversationID,
       parentMessageId: state.parentMessageID,
       systemMessage: state.style,
@@ -152,7 +163,7 @@ async function handleMessage(msg: TelegramBot.Message) {
     editMessage(respMsg, escapeMarkdown(response.text));
     logWithTime("📨 Response:", response);
   } catch (err) {
-    logWithTime("⛔️ ChatGPT API error:", err.message);
+    logWithTime("⛔️ OpenRouter API error:", err.message);
     // If the error contains session token has expired, then get a new session token
     if (err.message.includes("session token may have expired")) {
       bot.sendMessage(chatId, "🔑 Token has expired, please update the token.");
