@@ -5,12 +5,56 @@ import TelegramBot from "npm:node-telegram-bot-api@^0.60.0";
 
 import "https://deno.land/x/dotenv@v3.2.0/load.ts";
 
+// Функция для записи диалогов в лог
+async function logDialog(
+  chatId: number,
+  chatType: string,
+  userName: string,
+  userMessage: string,
+  botResponse: string,
+  isAutoComment: boolean = false
+) {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    chatId,
+    chatType,
+    userName,
+    userMessage,
+    botResponse,
+    isAutoComment,
+    separator: "---"
+  };
+  
+  const logLine = `[${timestamp}] ${chatType} | ${userName} (${chatId}): "${userMessage}" → BOT: "${botResponse}" ${isAutoComment ? "(AUTO)" : ""}\n${"=".repeat(100)}\n`;
+  
+  try {
+    await Deno.writeTextFile("dialogs.log", logLine, { append: true });
+  } catch (error) {
+    console.error("Ошибка записи в лог диалогов:", error);
+  }
+}
+
+// Функция для логирования с временем
+function logWithTime(...args: unknown[]) {
+  const timestamp = new Date().toLocaleString("ru-RU");
+  console.log(timestamp, ...args);
+}
+
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN");
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
 const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ??
   "cognitivecomputations/dolphin-mistral-24b-venice-edition:free";
 const OPENROUTER_API_BASE = Deno.env.get("OPENROUTER_API_BASE") ??
   "https://openrouter.ai/api";
+// Настройка поведения бота в групповых чатах
+const COMMENT_ALL_MESSAGES = Deno.env.get("COMMENT_ALL_MESSAGES") === "true";
+// Настройка постоянного стиля общения
+const DEFAULT_STYLE = Deno.env.get("DEFAULT_STYLE") || "";
+// Настройки автокомментирования
+const AUTO_COMMENT_CHANCE = parseInt(Deno.env.get("AUTO_COMMENT_CHANCE") || "15"); // Шанс в %
+const MIN_MESSAGES_TO_TRIGGER = parseInt(Deno.env.get("MIN_MESSAGES_TO_TRIGGER") || "3"); // Минимум сообщений
+const AUTO_COMMENT_COOLDOWN = parseInt(Deno.env.get("AUTO_COMMENT_COOLDOWN") || "300"); // Пауза в секундах
 
 if (!BOT_TOKEN || !OPENROUTER_API_KEY) {
   logWithTime("⛔️ BOT_TOKEN and OPENROUTER_API_KEY must be set");
@@ -53,6 +97,178 @@ const chatContext = new Map<
   { conversationID?: string; parentMessageID?: string; style?: string }
 >();
 
+// Система отслеживания активности чатов для автокомментирования
+const chatActivity = new Map<
+  number,
+  { 
+    messageCount: number; 
+    lastMessages: Array<{text: string; timestamp: number; userName: string}>;
+    lastAutoComment: number;
+    lastMessageTime: number;
+    isInitialized: boolean; // Флаг инициализации контекста
+    currentTopic: string; // Текущая тема разговора
+    topicChangeTime: number; // Время последней смены темы
+  }
+>();
+
+// Функция для анализа темы разговора
+function analyzeTopic(messages: Array<{text: string; userName: string}>): string {
+  if (messages.length === 0) return "общий";
+  
+  // Собираем все слова из последних сообщений
+  const allWords = messages
+    .map(msg => msg.text.toLowerCase())
+    .join(" ")
+    .split(/\s+/)
+    .filter(word => word.length > 3); // Игнорируем короткие слова
+  
+  // Простые ключевые слова для определения темы
+  const topics = {
+    "технологии": ["программирование", "код", "разработка", "технологии", "айти", "программист", "разработчик"],
+    "работа": ["работа", "проект", "задача", "дедлайн", "начальник", "коллега", "офис"],
+    "развлечения": ["фильм", "игра", "музыка", "концерт", "вечеринка", "отдых", "развлечения"],
+    "спорт": ["спорт", "футбол", "тренировка", "зал", "бег", "фитнес"],
+    "политика": ["политика", "выборы", "правительство", "закон", "новости"],
+    "семья": ["семья", "дети", "муж", "жена", "родители", "дом"]
+  };
+  
+  // Подсчитываем совпадения для каждой темы
+  const topicScores: {[key: string]: number} = {};
+  
+  for (const [topic, keywords] of Object.entries(topics)) {
+    topicScores[topic] = keywords.reduce((score, keyword) => {
+      return score + (allWords.includes(keyword) ? 1 : 0);
+    }, 0);
+  }
+  
+  // Находим тему с наибольшим количеством совпадений
+  const maxScore = Math.max(...Object.values(topicScores));
+  const detectedTopic = maxScore > 0 
+    ? Object.keys(topicScores).find(topic => topicScores[topic] === maxScore) || "общий"
+    : "общий";
+  
+  return detectedTopic;
+}
+
+// Функция для инициализации контекста чата при перезапуске
+async function initializeChatContext(chatId: number): Promise<void> {
+  try {
+    // Получаем последние 30 сообщений из чата
+    const updates = await bot.getUpdates({
+      limit: 100, // Получаем больше обновлений для поиска нужного чата
+      timeout: 1
+    });
+    
+    // Фильтруем сообщения для конкретного чата
+    const chatMessages = updates
+      .filter(update => update.message?.chat.id === chatId)
+      .map(update => update.message)
+      .filter(msg => msg && msg.text && !msg.from?.is_bot)
+      .slice(-30); // Берем последние 30 сообщений
+    
+         if (chatMessages.length > 0) {
+       const activity = chatActivity.get(chatId) || {
+         messageCount: 0,
+         lastMessages: [],
+         lastAutoComment: 0,
+         lastMessageTime: 0,
+         isInitialized: false,
+         currentTopic: "общий",
+         topicChangeTime: Date.now()
+       };
+       
+       // Добавляем исторические сообщения в контекст
+       const now = Date.now();
+       activity.lastMessages = chatMessages.map(msg => ({
+         text: msg.text!,
+         timestamp: now - (chatMessages.length - chatMessages.indexOf(msg)) * 60000, // Примерное время
+         userName: msg.from?.first_name || msg.from?.username || "Unknown"
+       }));
+       
+       // Определяем начальную тему
+       activity.currentTopic = analyzeTopic(activity.lastMessages);
+       activity.isInitialized = true;
+       chatActivity.set(chatId, activity);
+       
+       logWithTime(`📚 Инициализирован контекст для чата ${chatId} с ${chatMessages.length} сообщениями, тема: ${activity.currentTopic}`);
+     }
+  } catch (error) {
+    logWithTime(`❌ Ошибка инициализации контекста для чата ${chatId}:`, error);
+  }
+}
+
+// Функция для проверки, нужно ли боту автоматически комментировать
+function shouldAutoComment(chatId: number, messageText: string, userName: string): boolean {
+  const now = Date.now();
+  const activity = chatActivity.get(chatId) || {
+    messageCount: 0,
+    lastMessages: [],
+    lastAutoComment: 0,
+    lastMessageTime: 0,
+    isInitialized: false,
+    currentTopic: "общий",
+    topicChangeTime: now
+  };
+
+  // Обновляем активность
+  activity.messageCount++;
+  activity.lastMessages.push({text: messageText, timestamp: now, userName});
+  activity.lastMessageTime = now;
+  
+  // Удаляем сообщения старше 5 минут (300 секунд)
+  const fiveMinutesAgo = now - (5 * 60 * 1000);
+  activity.lastMessages = activity.lastMessages.filter(msg => msg.timestamp > fiveMinutesAgo);
+  
+  // Анализируем текущую тему
+  const newTopic = analyzeTopic(activity.lastMessages);
+  const topicChanged = newTopic !== activity.currentTopic;
+  
+  if (topicChanged) {
+    activity.currentTopic = newTopic;
+    activity.topicChangeTime = now;
+    logWithTime(`🔄 Смена темы в чате ${chatId}: ${activity.currentTopic} → ${newTopic}`);
+  }
+  
+  chatActivity.set(chatId, activity);
+
+  // Проверяем условия для автокомментирования:
+  // 1. Прошло достаточно времени с последнего автокомментария
+  // 2. Есть активность в чате (несколько сообщений за последние 5 минут)
+  // 3. Случайный шанс сработал ИЛИ произошла смена темы
+  
+  const timeSinceLastComment = (now - activity.lastAutoComment) / 1000;
+  const hasRecentActivity = activity.lastMessages.length >= 3; // Увеличиваем минимум до 3 сообщений
+  const cooldownPassed = timeSinceLastComment >= AUTO_COMMENT_COOLDOWN;
+  const randomNum = Math.random() * 100;
+  const randomChance = randomNum < AUTO_COMMENT_CHANCE;
+  const topicChangeTrigger = topicChanged && timeSinceLastComment >= 60; // Срабатываем на смену темы через минуту
+
+  // Отладочная информация
+  logWithTime(`🔍 Автокомментарий для чата ${chatId}:`, {
+    messages: activity.lastMessages.length,
+    hasActivity: hasRecentActivity,
+    timeSince: Math.round(timeSinceLastComment),
+    cooldown: AUTO_COMMENT_COOLDOWN,
+    cooldownOk: cooldownPassed,
+    random: Math.round(randomNum),
+    chance: AUTO_COMMENT_CHANCE,
+    randomOk: randomChance,
+    topicChanged,
+    topicChangeTrigger,
+    currentTopic: activity.currentTopic,
+    willComment: (hasRecentActivity && cooldownPassed && randomChance) || topicChangeTrigger
+  });
+
+  if ((hasRecentActivity && cooldownPassed && randomChance) || topicChangeTrigger) {
+    activity.lastAutoComment = now;
+    activity.messageCount = 0; // Сбрасываем счетчик
+    chatActivity.set(chatId, activity);
+    return true;
+  }
+
+  return false;
+}
+
 // Handle messages
 bot.on("message", async (msg) => {
   await handleMessage(msg);
@@ -87,10 +303,19 @@ function handleCommand(
 
   // help command
   if (trimmedText === "/help") {
-    bot.sendMessage(
-      msg.chat.id,
-      "🤖 This is a chatbot powered by OpenRouter models. You can use the following commands:\n\n/reload - Reset the conversation\n/style <text> - Set response style\n/help - Show this message",
-    );
+    const state = chatContext.get(msg.chat.id) ?? {};
+    const currentStyle = state.style || DEFAULT_STYLE;
+    
+    const helpText = `🤖 This is a chatbot powered by OpenRouter models. You can use the following commands:
+
+/reload - Reset the conversation
+/style <text> - Set response style
+/help - Show this message
+
+${COMMENT_ALL_MESSAGES ? "✅ Commenting all messages in groups" : "❌ Only responding to @mentions in groups"}
+${currentStyle ? `🎭 Current style: ${currentStyle.slice(0, 50)}${currentStyle.length > 50 ? '...' : ''}` : '🎭 No style set'}`;
+    
+    bot.sendMessage(msg.chat.id, helpText);
     return true;
   }
   return false;
@@ -102,18 +327,70 @@ async function handleMessage(msg: TelegramBot.Message) {
   if (!msg.text) {
     return;
   }
-  const trimmedText = msg.text.replace(`@${botName}`, "").trim();
-
-  // Only respond to messages that start with @botName or a valid command in a group chat
-  if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
-    if (!msg.text.startsWith(`@${botName}`)) {
-      handleCommand(msg, trimmedText);
-      return;
-    }
+  
+  // Игнорируем сообщения от самого бота
+  if (msg.from?.is_bot && msg.from?.username === botName) {
+    return;
   }
-
-  // Handle commands if needed
-  if (handleCommand(msg, trimmedText)) {
+  
+  const userName = `${msg.from?.first_name || ""} ${msg.from?.last_name || ""}`.trim() || msg.from?.username || "Unknown";
+  logWithTime(`📥 Получено сообщение в чате ${chatId} от ${userName}: ${msg.text}`);
+  
+  // Инициализируем контекст при первом сообщении в чате
+  const activity = chatActivity.get(chatId);
+  if (!activity?.isInitialized && (msg.chat.type === "group" || msg.chat.type === "supergroup")) {
+    await initializeChatContext(chatId);
+  }
+  
+  // Обрабатываем команды в любом типе чата
+  if (handleCommand(msg, msg.text.trim())) {
+    return;
+  }
+  
+  // Для групповых чатов: умная логика автокомментирования
+  // Для личных чатов: используем весь текст
+  let trimmedText: string;
+  let shouldRespond = false;
+  
+  if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
+    if (msg.text.startsWith(`@${botName}`)) {
+      // Если упоминают бота - ВСЕГДА отвечаем
+      trimmedText = msg.text.replace(`@${botName}`, "").trim();
+      shouldRespond = true;
+      logWithTime(`📢 Прямое упоминание в чате ${chatId}: ${trimmedText}`);
+    } else if (COMMENT_ALL_MESSAGES) {
+      // Старый режим: комментируем все сообщения
+      trimmedText = msg.text.trim();
+      shouldRespond = true;
+    } else {
+      // Новый умный режим: анализируем и вклиниваемся
+      const shouldAutoReply = shouldAutoComment(chatId, msg.text, userName);
+             if (shouldAutoReply) {
+         // Создаем контекст из последних сообщений для умного ответа
+         const activity = chatActivity.get(chatId);
+         const recentMessages = activity?.lastMessages || [];
+         
+         // Формируем контекст с именами пользователей
+         const contextWithUsers = recentMessages
+           .map(msg => `${msg.userName}: ${msg.text}`)
+           .join(" | ");
+         
+         const topicInfo = activity?.currentTopic ? `Тема: ${activity.currentTopic}. ` : "";
+         trimmedText = `${topicInfo}Контекст беседы: ${contextWithUsers}. Прокомментируй по теме, вклинься естественно.`;
+         shouldRespond = true;
+         logWithTime(`🤖 Автокомментарий в чате ${chatId} на основе ${recentMessages.length} сообщений, тема: ${activity?.currentTopic}`);
+       } else {
+        // Просто отслеживаем, но не отвечаем
+        return;
+      }
+    }
+  } else {
+    // В личных чатах используем весь текст
+    trimmedText = msg.text.trim();
+    shouldRespond = true;
+  }
+  
+  if (!shouldRespond) {
     return;
   }
 
@@ -126,9 +403,7 @@ async function handleMessage(msg: TelegramBot.Message) {
   // Send a message to the chat acknowledging receipt of their message
   let respMsg: TelegramBot.Message;
   try {
-    respMsg = await bot.sendMessage(chatId, "🤔", {
-      reply_to_message_id: msg.message_id,
-    });
+    respMsg = await bot.sendMessage(chatId, "🤔");
     bot.sendChatAction(chatId, "typing");
   } catch (err) {
     logWithTime("⛔️ Telegram API error:", err.message);
@@ -138,10 +413,12 @@ async function handleMessage(msg: TelegramBot.Message) {
   // Send message to OpenRouter
   try {
     const state = chatContext.get(chatId) ?? {};
+    // Используем стиль из настроек чата или стиль по умолчанию
+    const currentStyle = state.style || DEFAULT_STYLE;
     const response: ChatMessage = await openRouterAPI.sendMessage(trimmedText, {
       conversationId: state.conversationID,
       parentMessageId: state.parentMessageID,
-      systemMessage: state.style,
+      systemMessage: currentStyle,
       onProgress: _.throttle(
         async (partialResponse: ChatMessage) => {
           respMsg = await editMessage(
@@ -154,14 +431,37 @@ async function handleMessage(msg: TelegramBot.Message) {
         4000,
         { leading: true, trailing: false },
       ),
-    });
-    // Update conversationID and parentMessageID for this chat
-    chatContext.set(chatId, {
-      conversationID: response.conversationId,
-      parentMessageID: response.id,
-    });
-    editMessage(respMsg, escapeMarkdown(response.text));
-    logWithTime("📨 Response:", response);
+         });
+     // Update conversationID and parentMessageID for this chat
+     chatContext.set(chatId, {
+       conversationID: response.conversationId,
+       parentMessageID: response.id,
+     });
+     
+     // Проверяем, просит ли пользователь пояснить что-то
+     const isAskingForExplanation = trimmedText.toLowerCase().includes("поясни") || 
+                                   trimmedText.toLowerCase().includes("объясни") ||
+                                   trimmedText.toLowerCase().includes("расскажи подробнее") ||
+                                   trimmedText.toLowerCase().includes("что ты имеешь в виду");
+     
+     // Ограничиваем длину ответа для краткости (если не просят пояснить)
+     const maxLength = isAskingForExplanation ? 500 : 200;
+     const limitedResponse = limitResponseLength(response.text, maxLength);
+     editMessage(respMsg, escapeMarkdown(limitedResponse));
+     logWithTime(`📨 Response (limited to ${maxLength} chars):`, limitedResponse);
+    
+    // Логируем диалог в файл
+    const chatType = msg.chat.type === "private" ? "PRIVATE" : "GROUP";
+    const isAutoComment = trimmedText.includes("Контекст беседы:");
+    
+         await logDialog(
+       chatId,
+       chatType,
+       userName,
+       msg.text,
+       limitedResponse,
+       isAutoComment
+     );
   } catch (err) {
     logWithTime("⛔️ OpenRouter API error:", err.message);
     // If the error contains session token has expired, then get a new session token
@@ -174,6 +474,34 @@ async function handleMessage(msg: TelegramBot.Message) {
       );
     }
   }
+}
+
+// Функция для ограничения длины ответа
+function limitResponseLength(text: string, maxLength: number = 200): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+  
+  // Ищем последнее предложение, которое поместится в лимит
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  let result = "";
+  
+  for (const sentence of sentences) {
+    const testResult = result + sentence + ".";
+    if (testResult.length <= maxLength) {
+      result = testResult;
+    } else {
+      break;
+    }
+  }
+  
+  // Если не удалось найти подходящие предложения, обрезаем по словам
+  if (!result) {
+    const words = text.split(" ");
+    result = words.slice(0, Math.floor(maxLength / 8)).join(" ") + "...";
+  }
+  
+  return result;
 }
 
 // Escape Telegram MarkdownV2 special characters
@@ -208,9 +536,4 @@ async function editMessage(
     logWithTime("⛔️ Edit message error:", err.message);
     return msg;
   }
-}
-
-// deno-lint-ignore no-explicit-any
-function logWithTime(...args: any[]) {
-  console.log(new Date().toLocaleString(), ...args);
 }
