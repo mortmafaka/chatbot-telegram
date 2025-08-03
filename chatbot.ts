@@ -103,7 +103,7 @@ const chatContext = new Map<
 const chatActivity = new Map<
   number,
   {
-    messageCount: number;
+    topicMessageCount: number;
     lastMessages: Array<{ text: string; timestamp: number; userName: string }>;
     lastAutoComment: number;
     lastMessageTime: number;
@@ -165,7 +165,7 @@ async function initializeChatContext(chatId: number): Promise<void> {
 
     if (chatMessages.length > 0) {
       const activity = chatActivity.get(chatId) || {
-        messageCount: 0,
+        topicMessageCount: chatMessages.length,
         lastMessages: [],
         lastAutoComment: 0,
         lastMessageTime: 0,
@@ -182,6 +182,8 @@ async function initializeChatContext(chatId: number): Promise<void> {
           (chatMessages.length - chatMessages.indexOf(msg)) * 60000, // Примерное время
         userName: msg.from?.first_name || msg.from?.username || "Unknown",
       }));
+
+      activity.topicMessageCount = chatMessages.length;
 
       // Определяем начальную тему через n8n
       activity.currentTopic = await analyzeTopic(activity.lastMessages);
@@ -205,7 +207,7 @@ async function shouldAutoComment(
 ): Promise<boolean> {
   const now = Date.now();
   const activity = chatActivity.get(chatId) || {
-    messageCount: 0,
+    topicMessageCount: 0,
     lastMessages: [],
     lastAutoComment: 0,
     lastMessageTime: 0,
@@ -215,7 +217,7 @@ async function shouldAutoComment(
   };
 
   // Обновляем активность
-  activity.messageCount++;
+  activity.topicMessageCount++;
   activity.lastMessages.push({ text: messageText, timestamp: now, userName });
   activity.lastMessageTime = now;
 
@@ -232,6 +234,7 @@ async function shouldAutoComment(
   if (topicChanged) {
     activity.currentTopic = newTopic;
     activity.topicChangeTime = now;
+    activity.topicMessageCount = 1; // текущее сообщение — первое в новой теме
     logWithTime(
       `🔄 Смена темы в чате ${chatId}: ${activity.currentTopic} → ${newTopic}`,
     );
@@ -241,25 +244,30 @@ async function shouldAutoComment(
 
   // Проверяем условия для автокомментирования:
   // 1. Прошло достаточно времени с последнего автокомментария
-  // 2. Есть активность в чате (несколько сообщений за последние 5 минут)
+  // 2. Достаточно сообщений в текущей теме
   // 3. Случайный шанс сработал ИЛИ произошла смена темы
 
   const timeSinceLastComment = (now - activity.lastAutoComment) / 1000;
   const hasRecentActivity =
-    activity.lastMessages.length >= MIN_MESSAGES_TO_TRIGGER; // Минимум сообщений для активности
+    activity.topicMessageCount >= MIN_MESSAGES_TO_TRIGGER;
   const cooldownPassed = timeSinceLastComment >= AUTO_COMMENT_COOLDOWN;
-  const randomNum = Math.random() * 100;
-  const randomChance = randomNum < AUTO_COMMENT_CHANCE;
+  let randomNum = 0;
+  let randomChance = false;
+  if (hasRecentActivity) {
+    randomNum = Math.random() * 100;
+    randomChance = randomNum < AUTO_COMMENT_CHANCE;
+  }
   const topicChangeTrigger = topicChanged && timeSinceLastComment >= 60; // Срабатываем на смену темы через минуту
 
   // Отладочная информация
   logWithTime(`🔍 Автокомментарий для чата ${chatId}:`, {
     messages: activity.lastMessages.length,
+    topicMessages: activity.topicMessageCount,
     hasActivity: hasRecentActivity,
     timeSince: Math.round(timeSinceLastComment),
     cooldown: AUTO_COMMENT_COOLDOWN,
     cooldownOk: cooldownPassed,
-    random: Math.round(randomNum),
+    random: hasRecentActivity ? Math.round(randomNum) : null,
     chance: AUTO_COMMENT_CHANCE,
     randomOk: randomChance,
     topicChanged,
@@ -273,7 +281,7 @@ async function shouldAutoComment(
     (hasRecentActivity && cooldownPassed && randomChance) || topicChangeTrigger
   ) {
     activity.lastAutoComment = now;
-    activity.messageCount = 0; // Сбрасываем счетчик
+    activity.topicMessageCount = 0; // Сбрасываем счетчик
     chatActivity.set(chatId, activity);
     return true;
   }
