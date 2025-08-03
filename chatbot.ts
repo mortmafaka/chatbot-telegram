@@ -47,11 +47,12 @@ bot.on("message", async (msg) => {
   await handleMessage(msg);
 });
 
-function handleCommand(msg: TelegramBot.Message): boolean {
-  const trimedText = msg.text?.replace(`@${botName}`, "").trim();
-
+function handleCommand(
+  msg: TelegramBot.Message,
+  trimmedText: string,
+): boolean {
   // reload command
-  if (trimedText === "/reload" || trimedText == "/reset") {
+  if (trimmedText === "/reload" || trimmedText == "/reset") {
     chatContext.delete(msg.chat.id);
     bot.sendMessage(msg.chat.id, "🔄 Conversation has been reset, enjoy!");
     logWithTime("🔄 Conversation has been reset");
@@ -59,8 +60,8 @@ function handleCommand(msg: TelegramBot.Message): boolean {
   }
 
   // style command
-  if (trimedText?.startsWith("/style")) {
-    const styleText = trimedText.replace("/style", "").trim();
+  if (trimmedText.startsWith("/style")) {
+    const styleText = trimmedText.replace("/style", "").trim();
     if (styleText) {
       const state = chatContext.get(msg.chat.id) ?? {};
       state.style = styleText;
@@ -74,7 +75,7 @@ function handleCommand(msg: TelegramBot.Message): boolean {
   }
 
   // help command
-  if (trimedText === "/help") {
+  if (trimmedText === "/help") {
     bot.sendMessage(
       msg.chat.id,
       "🤖 This is a chatbot powered by ChatGPT. You can use the following commands:\n\n/reload - Reset the conversation\n/style <text> - Set ChatGPT response style\n/help - Show this message",
@@ -90,27 +91,26 @@ async function handleMessage(msg: TelegramBot.Message) {
   if (!msg.text) {
     return;
   }
+  const trimmedText = msg.text.replace(`@${botName}`, "").trim();
 
   // Only respond to messages that start with @botName or a valid command in a group chat
   if (msg.chat.type === "group" || msg.chat.type === "supergroup") {
     if (!msg.text.startsWith(`@${botName}`)) {
-      handleCommand(msg);
+      handleCommand(msg, trimmedText);
       return;
     }
   }
 
   // Handle commands if needed
-  if (handleCommand(msg)) {
+  if (handleCommand(msg, trimmedText)) {
     return;
   }
 
-  // Remove @botName from message
-  const message = msg.text.replace(`@${botName}`, "").trim();
-  if (message === "") {
+  if (trimmedText === "") {
     return;
   }
 
-  logWithTime(`📩 Message from ${msg.chat.id}:`, message);
+  logWithTime(`📩 Message from ${msg.chat.id}:`, trimmedText);
 
   // Send a message to the chat acknowledging receipt of their message
   let respMsg: TelegramBot.Message;
@@ -127,7 +127,7 @@ async function handleMessage(msg: TelegramBot.Message) {
   // Send message to ChatGPT
   try {
     const state = chatContext.get(chatId) ?? {};
-    const response: ChatMessage = await chatGPTAPI.sendMessage(message, {
+    const response: ChatMessage = await chatGPTAPI.sendMessage(trimmedText, {
       conversationId: state.conversationID,
       parentMessageId: state.parentMessageID,
       systemMessage: state.style,
