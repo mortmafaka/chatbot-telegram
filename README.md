@@ -58,12 +58,8 @@ deno cache --lock=lock.json chatbot.ts
 BOT_TOKEN=YOUR_BOT_TOKEN
 OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY
 OPENROUTER_MODEL=cognitivecomputations/dolphin-mistral-24b-venice-edition:free
-N8N_TOPIC_URL=https://your-n8n-endpoint.example
-N8N_TIMEOUT_MS=5000
 ```
 
-`N8N_TOPIC_URL` and `N8N_TIMEOUT_MS` are optional and enable topic analysis
-through an n8n workflow.
 
 To get your API key, see [Get OpenRouter API Key](#-get-openrouter-api-key).
 
