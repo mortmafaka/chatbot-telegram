@@ -54,9 +54,6 @@ const MIN_MESSAGES_TO_TRIGGER = parseInt(
 const AUTO_COMMENT_COOLDOWN = parseInt(
   Deno.env.get("AUTO_COMMENT_COOLDOWN") || "300",
 ); // Пауза в секундах
-// Настройки анализа темы через n8n
-const N8N_TOPIC_URL = Deno.env.get("N8N_TOPIC_URL");
-const N8N_TIMEOUT_MS = parseInt(Deno.env.get("N8N_TIMEOUT_MS") || "5000");
 
 if (!BOT_TOKEN || !OPENROUTER_API_KEY) {
   logWithTime("⛔️ BOT_TOKEN and OPENROUTER_API_KEY must be set");
@@ -103,49 +100,13 @@ const chatContext = new Map<
 const chatActivity = new Map<
   number,
   {
-    topicMessageCount: number;
+    messageCount: number;
     lastMessages: Array<{ text: string; timestamp: number; userName: string }>;
     lastAutoComment: number;
     lastMessageTime: number;
     isInitialized: boolean; // Флаг инициализации контекста
-    currentTopic: string; // Текущая тема разговора
-    topicChangeTime: number; // Время последней смены темы
   }
 >();
-
-// Функция для анализа темы разговора через n8n
-async function analyzeTopic(
-  messages: Array<{ text: string; userName: string }>,
-): Promise<string> {
-  if (!N8N_TOPIC_URL) return "общий";
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), N8N_TIMEOUT_MS);
-
-  try {
-    const resp = await fetch(N8N_TOPIC_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const text = await resp.text();
-    try {
-      const data = JSON.parse(text);
-      if (typeof data === "string") return data || "общий";
-      if (typeof data.topic === "string") return data.topic || "общий";
-      if (typeof data.label === "string") return data.label || "общий";
-      return "общий";
-    } catch {
-      return text.trim() || "общий";
-    }
-  } catch (error) {
-    logWithTime("⚠️ Ошибка анализа темы через n8n:", error?.message || error);
-    return "общий";
-  }
-}
 
 // Функция для инициализации контекста чата при перезапуске
 async function initializeChatContext(chatId: number): Promise<void> {
@@ -165,13 +126,11 @@ async function initializeChatContext(chatId: number): Promise<void> {
 
     if (chatMessages.length > 0) {
       const activity = chatActivity.get(chatId) || {
-        topicMessageCount: chatMessages.length,
+        messageCount: chatMessages.length,
         lastMessages: [],
         lastAutoComment: 0,
         lastMessageTime: 0,
         isInitialized: false,
-        currentTopic: "общий",
-        topicChangeTime: Date.now(),
       };
 
       // Добавляем исторические сообщения в контекст
@@ -183,15 +142,12 @@ async function initializeChatContext(chatId: number): Promise<void> {
         userName: msg.from?.first_name || msg.from?.username || "Unknown",
       }));
 
-      activity.topicMessageCount = chatMessages.length;
-
-      // Определяем начальную тему через n8n
-      activity.currentTopic = await analyzeTopic(activity.lastMessages);
+      activity.messageCount = chatMessages.length;
       activity.isInitialized = true;
       chatActivity.set(chatId, activity);
 
       logWithTime(
-        `📚 Инициализирован контекст для чата ${chatId} с ${chatMessages.length} сообщениями, тема: ${activity.currentTopic}`,
+        `📚 Инициализирован контекст для чата ${chatId} с ${chatMessages.length} сообщениями`,
       );
     }
   } catch (error) {
@@ -207,17 +163,15 @@ async function shouldAutoComment(
 ): Promise<boolean> {
   const now = Date.now();
   const activity = chatActivity.get(chatId) || {
-    topicMessageCount: 0,
+    messageCount: 0,
     lastMessages: [],
     lastAutoComment: 0,
     lastMessageTime: 0,
     isInitialized: false,
-    currentTopic: "общий",
-    topicChangeTime: now,
   };
 
   // Обновляем активность
-  activity.topicMessageCount++;
+  activity.messageCount++;
   activity.lastMessages.push({ text: messageText, timestamp: now, userName });
   activity.lastMessageTime = now;
 
@@ -227,29 +181,15 @@ async function shouldAutoComment(
     msg.timestamp > fiveMinutesAgo
   );
 
-  // Анализируем текущую тему
-  const newTopic = await analyzeTopic(activity.lastMessages);
-  const topicChanged = newTopic !== activity.currentTopic;
-
-  if (topicChanged) {
-    activity.currentTopic = newTopic;
-    activity.topicChangeTime = now;
-    activity.topicMessageCount = 1; // текущее сообщение — первое в новой теме
-    logWithTime(
-      `🔄 Смена темы в чате ${chatId}: ${activity.currentTopic} → ${newTopic}`,
-    );
-  }
-
   chatActivity.set(chatId, activity);
 
   // Проверяем условия для автокомментирования:
   // 1. Прошло достаточно времени с последнего автокомментария
-  // 2. Достаточно сообщений в текущей теме
-  // 3. Случайный шанс сработал ИЛИ произошла смена темы
+  // 2. Достаточно сообщений с момента последнего комментария
+  // 3. Случайный шанс сработал
 
   const timeSinceLastComment = (now - activity.lastAutoComment) / 1000;
-  const hasRecentActivity =
-    activity.topicMessageCount >= MIN_MESSAGES_TO_TRIGGER;
+  const hasRecentActivity = activity.messageCount >= MIN_MESSAGES_TO_TRIGGER;
   const cooldownPassed = timeSinceLastComment >= AUTO_COMMENT_COOLDOWN;
   let randomNum = 0;
   let randomChance = false;
@@ -257,12 +197,10 @@ async function shouldAutoComment(
     randomNum = Math.random() * 100;
     randomChance = randomNum < AUTO_COMMENT_CHANCE;
   }
-  const topicChangeTrigger = topicChanged && timeSinceLastComment >= 60; // Срабатываем на смену темы через минуту
-
   // Отладочная информация
   logWithTime(`🔍 Автокомментарий для чата ${chatId}:`, {
     messages: activity.lastMessages.length,
-    topicMessages: activity.topicMessageCount,
+    totalMessages: activity.messageCount,
     hasActivity: hasRecentActivity,
     timeSince: Math.round(timeSinceLastComment),
     cooldown: AUTO_COMMENT_COOLDOWN,
@@ -270,18 +208,12 @@ async function shouldAutoComment(
     random: hasRecentActivity ? Math.round(randomNum) : null,
     chance: AUTO_COMMENT_CHANCE,
     randomOk: randomChance,
-    topicChanged,
-    topicChangeTrigger,
-    currentTopic: activity.currentTopic,
-    willComment: (hasRecentActivity && cooldownPassed && randomChance) ||
-      topicChangeTrigger,
+    willComment: hasRecentActivity && cooldownPassed && randomChance,
   });
 
-  if (
-    (hasRecentActivity && cooldownPassed && randomChance) || topicChangeTrigger
-  ) {
+  if (hasRecentActivity && cooldownPassed && randomChance) {
     activity.lastAutoComment = now;
-    activity.topicMessageCount = 0; // Сбрасываем счетчик
+    activity.messageCount = 0; // Сбрасываем счетчик
     chatActivity.set(chatId, activity);
     return true;
   }
@@ -412,11 +344,7 @@ async function handleMessage(msg: TelegramBot.Message) {
       // Если упоминают бота или отвечают ему - ВСЕГДА отвечаем
       const mentionRegex = new RegExp(`@${botName}`, "gi");
       const baseText = msg.text.replace(mentionRegex, "").trim();
-      const activity = chatActivity.get(chatId);
-      const topicInfo = activity?.currentTopic
-        ? `Тема: ${activity.currentTopic}. `
-        : "";
-      trimmedText = `${topicInfo}${baseText}`;
+      trimmedText = baseText;
       shouldRespond = true;
       logWithTime(
         `📢 Прямое упоминание или ответ в чате ${chatId}: ${trimmedText}`,
@@ -441,15 +369,11 @@ async function handleMessage(msg: TelegramBot.Message) {
         const contextWithUsers = recentMessages
           .map((msg) => `${msg.userName}: ${msg.text}`)
           .join(" | ");
-
-        const topicInfo = activity?.currentTopic
-          ? `Тема: ${activity.currentTopic}. `
-          : "";
         trimmedText =
-          `${topicInfo}Контекст беседы: ${contextWithUsers}. Прокомментируй по теме, вклинься естественно.`;
+          `Контекст беседы: ${contextWithUsers}. Прокомментируй по теме, вклинься естественно.`;
         shouldRespond = true;
         logWithTime(
-          `🤖 Автокомментарий в чате ${chatId} на основе ${recentMessages.length} сообщений, тема: ${activity?.currentTopic}`,
+          `🤖 Автокомментарий в чате ${chatId} на основе ${recentMessages.length} сообщений`,
         );
       } else {
         // Просто отслеживаем, но не отвечаем
