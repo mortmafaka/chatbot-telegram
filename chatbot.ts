@@ -54,6 +54,9 @@ const MIN_MESSAGES_TO_TRIGGER = parseInt(
 const AUTO_COMMENT_COOLDOWN = parseInt(
   Deno.env.get("AUTO_COMMENT_COOLDOWN") || "300",
 ); // Пауза в секундах
+const BATCH_SUMMARY_INTERVAL = parseInt(
+  Deno.env.get("BATCH_SUMMARY_INTERVAL") || "300",
+); // Интервал в секундах для суммаризации батча
 
 if (!BOT_TOKEN || !OPENROUTER_API_KEY) {
   logWithTime("⛔️ BOT_TOKEN and OPENROUTER_API_KEY must be set");
@@ -104,9 +107,23 @@ const chatActivity = new Map<
     lastMessages: Array<{ text: string; timestamp: number; userName: string }>;
     lastAutoComment: number;
     lastMessageTime: number;
+    summaries: string[];
     isInitialized: boolean; // Флаг инициализации контекста
   }
 >();
+
+// Суммаризация сообщений батча
+async function summarizeMessages(
+  messages: Array<{ text: string; userName: string }>,
+): Promise<string> {
+  const conversation = messages
+    .map((m) => `${m.userName}: ${m.text}`)
+    .join(" | ");
+  const response = await openRouterAPI.sendMessage(
+    `Суммаризируй по темам следующие сообщения: ${conversation}`,
+  );
+  return response.text.trim();
+}
 
 // Функция для инициализации контекста чата при перезапуске
 async function initializeChatContext(chatId: number): Promise<void> {
@@ -130,6 +147,7 @@ async function initializeChatContext(chatId: number): Promise<void> {
         lastMessages: [],
         lastAutoComment: 0,
         lastMessageTime: 0,
+        summaries: [],
         isInitialized: false,
       };
 
@@ -167,8 +185,27 @@ async function shouldAutoComment(
     lastMessages: [],
     lastAutoComment: 0,
     lastMessageTime: 0,
+    summaries: [],
     isInitialized: false,
   };
+
+  // Суммаризируем предыдущий батч при длительном простое
+  if (
+    activity.lastMessageTime &&
+    now - activity.lastMessageTime > BATCH_SUMMARY_INTERVAL * 1000 &&
+    activity.lastMessages.length > 0
+  ) {
+    try {
+      const summary = await summarizeMessages(activity.lastMessages);
+      activity.summaries.push(summary);
+      // Ограничиваем количество сохраненных суммаризаций
+      if (activity.summaries.length > 10) activity.summaries.shift();
+    } catch (error) {
+      logWithTime(`❌ Ошибка суммаризации для чата ${chatId}:`, error);
+    }
+    activity.lastMessages = [];
+    activity.messageCount = 0;
+  }
 
   // Обновляем активность
   activity.messageCount++;
@@ -317,6 +354,12 @@ async function handleMessage(msg: TelegramBot.Message) {
     return;
   }
 
+  const autoReplyCandidate = await shouldAutoComment(
+    chatId,
+    msg.text,
+    userName,
+  );
+
   // Для групповых чатов: умная логика автокомментирования
   // Для личных чатов: используем весь текст
   let trimmedText: string;
@@ -341,10 +384,19 @@ async function handleMessage(msg: TelegramBot.Message) {
       botName.toLowerCase();
 
     if (isMentioned || isReplyToBot) {
-      // Если упоминают бота или отвечают ему - ВСЕГДА отвечаем
+      // Если упоминают бота или отвечают ему - отвечаем с учетом контекста
       const mentionRegex = new RegExp(`@${botName}`, "gi");
       const baseText = msg.text.replace(mentionRegex, "").trim();
-      trimmedText = baseText;
+      const activityNow = chatActivity.get(chatId);
+      const summaries = activityNow?.summaries?.slice(-3) || [];
+      const recentMessages = activityNow?.lastMessages.slice(0, -1) || [];
+      const contextWithUsers = [
+        ...summaries,
+        ...recentMessages.map((m) => `${m.userName}: ${m.text}`),
+      ].join(" | ");
+      trimmedText = contextWithUsers
+        ? `Контекст беседы: ${contextWithUsers}. Вопрос: ${baseText}`
+        : baseText;
       shouldRespond = true;
       logWithTime(
         `📢 Прямое упоминание или ответ в чате ${chatId}: ${trimmedText}`,
@@ -355,12 +407,7 @@ async function handleMessage(msg: TelegramBot.Message) {
       shouldRespond = true;
     } else {
       // Новый умный режим: анализируем и вклиниваемся
-      const shouldAutoReply = await shouldAutoComment(
-        chatId,
-        msg.text,
-        userName,
-      );
-      if (shouldAutoReply) {
+      if (autoReplyCandidate) {
         // Создаем контекст из последних сообщений для умного ответа
         const activity = chatActivity.get(chatId);
         const recentMessages = activity?.lastMessages || [];
