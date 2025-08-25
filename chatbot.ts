@@ -44,16 +44,6 @@ const OPENROUTER_API_BASE = Deno.env.get("OPENROUTER_API_BASE") ??
 const COMMENT_ALL_MESSAGES = Deno.env.get("COMMENT_ALL_MESSAGES") === "true";
 // Настройка постоянного стиля общения
 const DEFAULT_STYLE = Deno.env.get("DEFAULT_STYLE") || "";
-// Настройки автокомментирования
-const AUTO_COMMENT_CHANCE = parseInt(
-  Deno.env.get("AUTO_COMMENT_CHANCE") || "15",
-); // Шанс в %
-const MIN_MESSAGES_TO_TRIGGER = parseInt(
-  Deno.env.get("MIN_MESSAGES_TO_TRIGGER") || "3",
-); // Минимум сообщений
-const AUTO_COMMENT_COOLDOWN = parseInt(
-  Deno.env.get("AUTO_COMMENT_COOLDOWN") || "300",
-); // Пауза в секундах
 const BATCH_SUMMARY_INTERVAL = parseInt(
   Deno.env.get("BATCH_SUMMARY_INTERVAL") || "300",
 ); // Интервал в секундах для суммаризации батча
@@ -99,13 +89,11 @@ const chatContext = new Map<
   { conversationID?: string; parentMessageID?: string; style?: string }
 >();
 
-// Система отслеживания активности чатов для автокомментирования
+// Система отслеживания активности чатов
 const chatActivity = new Map<
   number,
   {
-    messageCount: number;
     lastMessages: Array<{ text: string; timestamp: number; userName: string }>;
-    lastAutoComment: number;
     lastMessageTime: number;
     summaries: string[];
     isInitialized: boolean; // Флаг инициализации контекста
@@ -143,9 +131,7 @@ async function initializeChatContext(chatId: number): Promise<void> {
 
     if (chatMessages.length > 0) {
       const activity = chatActivity.get(chatId) || {
-        messageCount: chatMessages.length,
         lastMessages: [],
-        lastAutoComment: 0,
         lastMessageTime: 0,
         summaries: [],
         isInitialized: false,
@@ -160,7 +146,7 @@ async function initializeChatContext(chatId: number): Promise<void> {
         userName: msg.from?.first_name || msg.from?.username || "Unknown",
       }));
 
-      activity.messageCount = chatMessages.length;
+      activity.lastMessageTime = activity.lastMessages.at(-1)?.timestamp || now;
       activity.isInitialized = true;
       chatActivity.set(chatId, activity);
 
@@ -173,17 +159,15 @@ async function initializeChatContext(chatId: number): Promise<void> {
   }
 }
 
-// Функция для проверки, нужно ли боту автоматически комментировать
-async function shouldAutoComment(
+// Обновление активности чата и суммаризация сообщений
+async function updateChatActivity(
   chatId: number,
   messageText: string,
   userName: string,
-): Promise<boolean> {
+): Promise<void> {
   const now = Date.now();
   const activity = chatActivity.get(chatId) || {
-    messageCount: 0,
     lastMessages: [],
-    lastAutoComment: 0,
     lastMessageTime: 0,
     summaries: [],
     isInitialized: false,
@@ -204,11 +188,9 @@ async function shouldAutoComment(
       logWithTime(`❌ Ошибка суммаризации для чата ${chatId}:`, error);
     }
     activity.lastMessages = [];
-    activity.messageCount = 0;
   }
 
   // Обновляем активность
-  activity.messageCount++;
   activity.lastMessages.push({ text: messageText, timestamp: now, userName });
   activity.lastMessageTime = now;
 
@@ -219,43 +201,6 @@ async function shouldAutoComment(
   );
 
   chatActivity.set(chatId, activity);
-
-  // Проверяем условия для автокомментирования:
-  // 1. Прошло достаточно времени с последнего автокомментария
-  // 2. Достаточно сообщений с момента последнего комментария
-  // 3. Случайный шанс сработал
-
-  const timeSinceLastComment = (now - activity.lastAutoComment) / 1000;
-  const hasRecentActivity = activity.messageCount >= MIN_MESSAGES_TO_TRIGGER;
-  const cooldownPassed = timeSinceLastComment >= AUTO_COMMENT_COOLDOWN;
-  let randomNum = 0;
-  let randomChance = false;
-  if (hasRecentActivity) {
-    randomNum = Math.random() * 100;
-    randomChance = randomNum < AUTO_COMMENT_CHANCE;
-  }
-  // Отладочная информация
-  logWithTime(`🔍 Автокомментарий для чата ${chatId}:`, {
-    messages: activity.lastMessages.length,
-    totalMessages: activity.messageCount,
-    hasActivity: hasRecentActivity,
-    timeSince: Math.round(timeSinceLastComment),
-    cooldown: AUTO_COMMENT_COOLDOWN,
-    cooldownOk: cooldownPassed,
-    random: hasRecentActivity ? Math.round(randomNum) : null,
-    chance: AUTO_COMMENT_CHANCE,
-    randomOk: randomChance,
-    willComment: hasRecentActivity && cooldownPassed && randomChance,
-  });
-
-  if (hasRecentActivity && cooldownPassed && randomChance) {
-    activity.lastAutoComment = now;
-    activity.messageCount = 0; // Сбрасываем счетчик
-    chatActivity.set(chatId, activity);
-    return true;
-  }
-
-  return false;
 }
 
 // Handle messages
@@ -354,13 +299,9 @@ async function handleMessage(msg: TelegramBot.Message) {
     return;
   }
 
-  const autoReplyCandidate = await shouldAutoComment(
-    chatId,
-    msg.text,
-    userName,
-  );
+  await updateChatActivity(chatId, msg.text, userName);
 
-  // Для групповых чатов: умная логика автокомментирования
+  // Для групповых чатов: отвечаем по упоминанию
   // Для личных чатов: используем весь текст
   let trimmedText: string;
   let shouldRespond = false;
@@ -406,26 +347,7 @@ async function handleMessage(msg: TelegramBot.Message) {
       trimmedText = msg.text.trim();
       shouldRespond = true;
     } else {
-      // Новый умный режим: анализируем и вклиниваемся
-      if (autoReplyCandidate) {
-        // Создаем контекст из последних сообщений для умного ответа
-        const activity = chatActivity.get(chatId);
-        const recentMessages = activity?.lastMessages || [];
-
-        // Формируем контекст с именами пользователей
-        const contextWithUsers = recentMessages
-          .map((msg) => `${msg.userName}: ${msg.text}`)
-          .join(" | ");
-        trimmedText =
-          `Контекст беседы: ${contextWithUsers}. Прокомментируй по теме, вклинься естественно.`;
-        shouldRespond = true;
-        logWithTime(
-          `🤖 Автокомментарий в чате ${chatId} на основе ${recentMessages.length} сообщений`,
-        );
-      } else {
-        // Просто отслеживаем, но не отвечаем
-        return;
-      }
+      return;
     }
   } else {
     // В личных чатах используем весь текст
@@ -499,15 +421,12 @@ async function handleMessage(msg: TelegramBot.Message) {
 
     // Логируем диалог в файл
     const chatType = msg.chat.type === "private" ? "PRIVATE" : "GROUP";
-    const isAutoComment = trimmedText.includes("Контекст беседы:");
-
     await logDialog(
       chatId,
       chatType,
       userName,
       msg.text,
       limitedResponse,
-      isAutoComment,
     );
   } catch (err) {
     logWithTime("⛔️ OpenRouter API error:", err.message);
